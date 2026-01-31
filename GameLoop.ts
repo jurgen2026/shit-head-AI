@@ -1,9 +1,9 @@
 // node GameLoop.ts
 
-import GameEngine from "./GameEngine.js";
+import GameEngine from "./GameEngine.ts";
 import { gameConsole } from "./GameConsole.ts";
 import { timeDelays } from "../data/timeDelays.ts";
-import { eventBus } from "../event-system/eventBus.ts";
+import { eventBus } from "../utils/eventBus.ts";
 import delay from "../utils/delay.ts";
 
 type UI_GameType = "text" | "react";
@@ -29,7 +29,14 @@ export default class GameLoop {
 
         await delay(timeDelays.phaseTransitionDelays.playerInitilisationToCardDeal);
 
-        this.dealCardsPhase();
+        await this.dealCardsPhase();
+
+        while (this.gameEngine.playing) {
+
+            await this.playerTurnPhase();
+            this.gameEngine.advanceTurn();
+            await delay(timeDelays.turnTransition)
+        }
     }
 
     async initialiseGamePhase() {
@@ -55,6 +62,13 @@ export default class GameLoop {
         // should add another delay at some point however I can't be bothered for now
 
         await this.gameEngine.setFaceUps();
+        return true;
+    }
+
+    async playerTurnPhase() {
+
+        await this.gameEngine.runTurn()
+        await this.gameEngine.resolveTurn();
     }
 }
 

@@ -1,10 +1,16 @@
 // #region -- IMPORTS --
 
 // The event bus is created before export so it's the same for both App.jsx and the game engine
-import { eventBus } from "../event-system/eventBus.ts";
+import { eventBus } from "../utils/eventBus.ts";
 import { getRandomItem, getShuffledArray, generateUUID } from "../utils/getFunctions.ts";
-import { suitOrder, unshuffledDeck } from "../data/cardData.ts";
-import GameState  from "./GameState.js";
+import { suitOrder, unshuffledDeck, getCardIDs } from "../data/cardData.ts";
+import GameState  from "./GameState.ts";
+import AI_Stupid from "./AI_Stupid.ts";
+
+import type { EventHandlerMap, GameEvents } from "../types/eventTypes.ts";
+import type { PlayerInterface } from "../types/playerTypes.ts"; 
+import type { PlayerAction, AvailableValues, ZoneType } from "../types/generalTypes.ts";
+import type { CardData, Rank, StackTopCard } from "../types/cardTypes.ts";
 
 /*
 import { convertCardsForFrontEnd } from "../data/cardData.ts";
@@ -25,16 +31,19 @@ export default class GameEngine {
     static GAME_STORES = [] // static GAME_STORES = [useCardStore, useGameBoardStore, useGameStore, useLocalPlayerStore, usePlayerStore];
     static NAMES = ['Smeve', 'Smevlin', 'Smitticus', 'Ollies aborted feetus', 'Jamal']
 
-
+    public readonly id: string;
+    private gameState: GameState;
+    readonly playing: boolean
     
     constructor() {
         this.id = generateUUID();
         this.gameState = new GameState;
+        this.playing = this.gameState.playing;
     }
 
     setUpEventListeners() {
 
-        const eventHandlers = {
+        const eventHandlers: EventHandlerMap<GameEvents> = {
             
             HAND_CLEARED_REQUESTED: (eventData) => {
                 const { player } = eventData;
@@ -43,22 +52,19 @@ export default class GameEngine {
 
             DRAW_CARDS_REQUESTED: (eventData) => {
                 let { player, amount } = eventData;
-                console.log(`Draw request has been received with this data ${eventData}`);
 
                 // -- VALIDATION CHECKS --
                 //#region
                 if (!this.gameState.getDeck()) {
-                    console.log("Can't draw cards as no deck currently exists");
                     return;
                 }
 
                 if (!player) {
-                    console.log("Requested player doesn't exist (maybe no local player is set)");
+
                     return;
                 }
 
                 if (isNaN(amount) || !Number.isInteger(amount) || amount <= 0) {
-                    console.log(`Amount = ${amount} is an invalid card request`)
                     return;
                 }
                 //#endregion
@@ -71,10 +77,9 @@ export default class GameEngine {
             PLAY_CARDS_REQUESTED: (eventData) => {
                 const { player, cards } = eventData;
 
-                console.log('Card received for play request were: ', cards);
+
 
                 if (cards.length > 1) {
-                    console.log('Too many cards played for now');
                     return;
                 }
 
@@ -83,12 +88,10 @@ export default class GameEngine {
 
             VALIDATE_CARDS_REQUESTED: (eventData) => {
                 const {player, cards} =  eventData;
-                console.log(`Validate request has been received with this data ${eventData}`);
 
                 // -- CHECK IF CARDS HAVE ACTUALLY BEEN SENT --
 
                 if (!cards) {
-                    console.log("Play request denied as no cards were sent in the data package")
                     return;
                 }
                 
@@ -96,9 +99,8 @@ export default class GameEngine {
                     return this.validateCard(card);
                 })
 
-                console.log('Validation list is: ', cardValidationList);
 
-                eventBus.emit('CARD_VALIDATION_COMPLETE', {
+                eventBus.emit('CARD_VALIDATION_RESOLVED', {
                     cardValidationList
                 })
             },
@@ -114,7 +116,7 @@ export default class GameEngine {
 
     setUpStoreEventListeners() {
         GameEngine.GAME_STORES.forEach((store) => {
-            store.getState().setUpStoreEventListeners();
+            // store.getState().setUpStoreEventListeners();
         });
     }
 
@@ -134,8 +136,8 @@ export default class GameEngine {
         cards = getShuffledArray(cards);
         this.gameState.setDeck(cards);
 
-        eventBus.emit("CARDS_INITIALISED", {
-            deck: this.gameState.getDeck(),
+        eventBus.emit("CARDS_INITIALISED_RESOLVED", {
+            deck: getCardIDs(this.gameState.getDeck()),
         })
     }
 
@@ -148,10 +150,13 @@ export default class GameEngine {
 
         for (let i = 0; i < this.gameState.playerNumber; i++) {
 
-            const name = getRandomItem(GameEngine.NAMES);
+            const name = getRandomItem(GameEngine.NAMES) || "Smoblin";
             
-            const player = {
+            const playerType = (i === 0) ? "human" : "AI_Stupid";
+
+            const player: PlayerInterface = {
                 id: generateUUID(),
+                playerType,
                 name,
                 index: this.gameState.playerList.length
 
@@ -159,6 +164,12 @@ export default class GameEngine {
             };
 
             this.gameState.playerList.push(player);
+
+            if (player.playerType === "AI_Stupid") {
+                const ai_Stupid = new AI_Stupid(player.index);
+                ai_Stupid.setUpEventListeners();
+                this.gameState.AIs.push(ai_Stupid);
+            }
             
             this.gameState.zones[`${player.id}_hand`] = [];
             this.gameState.zones[`${player.id}_faceUps`] = [];
@@ -167,11 +178,32 @@ export default class GameEngine {
             eventBus.emit("PLAYER_INITIALISED", { player });
         }
 
-        console.log('Player list before event: ', this.gameState.playerList)
 
         eventBus.emit("PLAYER_INITIALISATION_RESOLVED", {
             playerList: this.gameState.playerList
         });
+    }
+
+    clearHand(player: PlayerInterface) {
+        this.gameState.setHand(player, []);
+        eventBus.emit('HAND_CLEARED_RESOLVED', { player });
+    }
+
+    clearZone(zoneKey: string) {
+        if (this.gameState.zones[zoneKey]) {
+            this.gameState.zones[zoneKey] = [];
+            //eventBus.emit("ZONE_CLEARED_RESOLVED", { zoneKey });
+        }
+    }
+
+    checkIfCanPlay(player: PlayerInterface) {
+        const playerHand = this.gameState.getHand(player);
+
+        const cardValidationList = playerHand.map((card) => {
+            return this.validateCard(card)
+        })
+
+        return (cardValidationList.every(item => item === false));
     }
 
     // This can be way more efficient this is shocking (abysmal coding)
@@ -184,28 +216,76 @@ export default class GameEngine {
 
     dealHands() {
         this.gameState.playerList.forEach( (player) => {
-            console.log('Testing starting hand size before draw cards is called ', this.gameState.getStartingHandSize())
-            this.drawCards(player, this.gameState.getStartingHandSize());
+            this.drawCards(player, this.gameState.startingHandSize);
         })
     }
 
-    drawBlinds(player, amount) {
+    determineActions(player: PlayerInterface): { availableActions: PlayerAction[], availableValues: AvailableValues } {
+        let availableActions = [];
+        let availableCards;
+        let availableValues: Rank[] = [];
+        
+        if (this.gameState.getDeck().length > 0) {
+            availableCards = this.gameState.getHand(player);
+            availableActions.push("playValues");
+
+        } else if (this.gameState.getHand(player).length === 0 && this.gameState.getFaceUps(player).length > 0) {
+            availableCards = this.gameState.getFaceUps(player);
+            availableActions.push("playFaceUps");
+
+        } else {
+
+            for (let i=1; i<=this.gameState.getBlinds(player).length; i++) {
+                availableValues.push((i as string) as Rank);
+            }
+
+            return {
+                availableActions: ["playBlinds"],
+                availableValues,
+            }
+        }
+
+        const cardValidationList = this.validateZone(availableCards);
+
+        if (cardValidationList.every(item => (item === false))) {
+            return {
+                availableActions: ['pickUpStack'], 
+                availableValues: [],
+            }
+        }
+
+        if (this.gameState.getStack().length > 0) {
+            availableActions.push("pickUpStack")
+        }
+
+
+        for (let i=0; i < availableCards.length; i++) {
+            if (cardValidationList[i] && !availableValues.includes(availableCards[i].rank)) {
+                availableValues.push(availableCards[i].rank);
+            }
+        }
+
+        return {
+            availableActions,
+            availableValues
+        }
+    }
+
+    drawBlinds(player: PlayerInterface, amount: number) {
         for (let i = 0; i < amount; i++) {
             const newCard = this.gameState.getDeck().shift();
-            this.gameState.getBlinds(player).push(newCard);
+            this.gameState.getBlinds(player).push(newCard!);
         }
 
         const playerBlinds = this.gameState.getBlinds(player);
 
-        console.log("Log before blinds event is emitted")
         eventBus.emit("BLINDS_DRAWN_RESOLVED", {
             player,
-            blindsDrawn: playerBlinds,
+            blindsDrawn: getCardIDs(playerBlinds),
         })
     }
 
-    drawCards(player, amount) {
-        console.log("Amount to draw is ", amount)
+    drawCards(player: PlayerInterface, amount: number) {
         let cardsDrawn = []
 
         for (let i = 0; i < amount; i++) {
@@ -220,36 +300,33 @@ export default class GameEngine {
 
         eventBus.emit("CARDS_DRAWN_RESOLVED", {
             player,
-            cardsDrawn,
-            playerHand: this.gameState.getHand(player),
+            cardsDrawn: getCardIDs(cardsDrawn),
+            playerHand: getCardIDs(this.gameState.getHand(player)),
         })
     }
 
-    playCards(player, cardsPlayed) {
+    playCards(player: PlayerInterface, cardsPlayed: CardData[]) {
 
         // Set the stack to include the new cards
         const stack = this.gameState.getStack();
 
-        this.gameState.setStack([...stack, ...cards]);
+        this.gameState.setStack([...stack, ...cardsPlayed]);
         this.gameState.stackValue = this.setStackValue(cardsPlayed[0]);
         this.gameState.stackEffect = this.setStackEffect(cardsPlayed[0]);
-
-        console.log('Stack is now: ',  this.gameState.getStack());
-        console.log('Stack value is now: ', this.gameState.stackValue)
-        console.log('Cards received was ', cards);
 
         // Remove them from the players hand
         const newPlayerHand = this.gameState.getHand(player).filter(card => !cardsPlayed.includes(card));
         this.gameState.setHand(player, this.sortCards(newPlayerHand));
 
-        eventBus.emit("CARDS_PLAYED", {
+        eventBus.emit("CARDS_PLAYED_RESOLVED", {
             player,
-            playerHand: this.gameState.getHand(player),
-            cardsPlayed,
+            playerHand: getCardIDs(this.gameState.getHand(player)),
+            cardsPlayed: getCardIDs(cardsPlayed),
+            stack: getCardIDs(this.gameState.getStack())
         })
     }
 
-    pickUpStack(player) {
+    pickUpStack(player: PlayerInterface) {
         const stack = this.gameState.getStack();
         const newPlayerHand = [
             ...this.gameState.getHand(player),
@@ -263,41 +340,65 @@ export default class GameEngine {
 
         eventBus.emit('STACK_PICKED_UP', {
             player,
-            cardsPickedUp: stack,
-            playerHand: cthis.gameState.getHand(player),
+            cardsPickedUp: getCardIDs(stack),
+            playerHand: getCardIDs(this.gameState.getHand(player)),
         });
     }
 
-    clearHand(player) {
-        this.gameState.setHand(player, []);
-        eventBus.emit('HAND_CLEARED', { player });
-    }
+    async resolveTurn() {
+        const activePlayer = this.gameState.activePlayer;
+        const playerHand = this.gameState.getHand(activePlayer!);
 
-    clearZone(zoneKey) {
-        if (this.gameState.zones[zoneKey]) {
-            this.gameState.zones[zoneKey] = [];
-            console.log(`Cleared zone: ${zoneKey}`);
-            eventBus.emit("ZONE_CLEARED", { zoneKey });
-        }
-    }
+        const isInInitialPhase = (this.gameState.getDeck().length > 0);
+        const playerBelowMinCards = (playerHand.length < this.gameState.getMinCards());
 
-    async resolveTurn(player) {
-        const playerHand = this.gameState.getHand(player);
-        // ! Return true condition once turn mechanics are implemented
-        const isInInitialPhase = false//(this.gameState.getDeck.length > 0);
-        const playerBelowMinCards = (playerHand.length < this.gameState.minCards );
 
         if (isInInitialPhase && playerBelowMinCards) {
-            const cardsToDraw = playerHand.length - this.gameState.minCards;
-
-            // The aim is the the turn ended event is emitted until the draw card animation is over
-            await eventBus.executeAndWait(
-                () => { this.drawCards(player, cardsToDraw) },
-                "CARDS_DRAWN_ANIMATION_COMPLETE"
-            );
+            const cardsToDraw = this.gameState.getMinCards()- playerHand.length;
+            this.drawCards(activePlayer!, cardsToDraw);
         }
 
-        eventBus.emit("TURN_ENDED")
+        return true;
+    }
+
+    async runTurn() {
+        const activePlayer = this.gameState.playerList[this.gameState.turnIndex]
+        this.gameState.activePlayer = activePlayer;
+
+        const { availableActions, availableValues } = this.determineActions(activePlayer);
+
+        const activePlayerHand = getCardIDs(this.gameState.getHand(activePlayer));
+
+        const stackTopCard = this.gameState.getStackTopCard();
+        const stackTopCardID = stackTopCard ? stackTopCard.ID : null;
+
+        const { payload } = await eventBus.executeAndWait(
+            () => {
+                eventBus.emit("ACTIVE_PLAYER_ACTION_DEMANDED",{
+                    activePlayer,
+                    activePlayerHand,
+                    availableActions,
+                    availableValues,
+                    stackTopCard: stackTopCardID,
+                })
+            },
+            "ACTIVE_PLAYER_ACTION_SUBMITTED"
+        )
+
+        const { selectedAction, selectedCards } = payload;
+
+        switch(selectedAction) {
+            case "playValues":
+                console.log('Before playCards()')
+                this.playCards(activePlayer, selectedCards!);
+                break;
+
+            case "pickUpStack":
+                this.pickUpStack(activePlayer);
+                break;
+        }
+
+        return true;
     }
 
     async setFaceUps() {
@@ -310,7 +411,7 @@ export default class GameEngine {
             const { payload } = await eventBus.executeAndWait(
                 () => { eventBus.emit("FACE_UPS_DEMANDED", { 
                     player,
-                    playerHand: this.gameState.getHand(player),
+                    playerHand: getCardIDs(this.gameState.getHand(player)),
                 })},
                 "FACE_UPS_SUBMITTED",
                 /*
@@ -320,17 +421,19 @@ export default class GameEngine {
             )
 
             const faceUpsSelected = payload.faceUpsSelected;
-            this.gameState.setFaceUps(faceUpsSelected);
+            this.gameState.setFaceUps(player, faceUpsSelected);
 
             const newPlayerHand = this.gameState.getHand(player).filter(card => !faceUpsSelected.includes(card));
             this.gameState.setHand(player, this.sortCards(newPlayerHand));
 
             eventBus.emit("FACE_UPS_SELECTED_RESOLVED", {
                 player,
-                faceUps: faceUpsSelected,
-                playerHand: this.gameState.getHand(player)
+                faceUps: getCardIDs(faceUpsSelected),
+                playerHand: getCardIDs(this.gameState.getHand(player))
             })
         }
+
+        return true;
     }
 
     setStackValue(topCard) {
@@ -370,8 +473,7 @@ export default class GameEngine {
         });
     }
 
-    validateCard(card) {
-        console.log('Stack value is currently: ', this.gameState.stackValue);
+    validateCard(card: CardData) {
 
         if (!this.gameState.stackValue) {
             return true;
@@ -386,5 +488,11 @@ export default class GameEngine {
         }
 
         return card.value >= this.gameState.stackValue;
+    }
+
+    validateZone(zone: ZoneType): boolean[] {
+        return zone.map((card) => {
+            return this.validateCard(card);
+        })
     }
 }
